@@ -165,6 +165,7 @@ class FlowClient:
         self.debug = debug or os.environ.get("GFLOW_DEBUG") == "true"
         self.cookies = cookies
         self._access_token: str = ""
+        self._token_expires: float = 0  # Unix timestamp when token expires
         self._project_id: str = ""
         self._workflow_id: str = ""
         self._primary_media_id: str = ""  # from workflow metadata — used for extend
@@ -219,9 +220,71 @@ class FlowClient:
     # ------------------------------------------------------------------
 
     def _ensure_token(self) -> None:
-        """Ensure we have a valid access token."""
-        if not self._access_token:
+        """Ensure we have a valid, non-expired access token."""
+        if not self._access_token or self._is_token_expired():
+            if self._is_token_expired():
+                logger.info("Access token expired or expiring soon, refreshing proactively...")
             self._refresh_token()
+
+    def _is_token_expired(self, buffer_seconds: int = 60) -> bool:
+        """Check if the access token is expired or will expire within buffer_seconds.
+
+        Returns False if no expiry info is available (assume valid until 401).
+        """
+        if not self._token_expires:
+            return False
+        return time.time() >= (self._token_expires - buffer_seconds)
+
+    @staticmethod
+    def _parse_expires(expires_value) -> float:
+        """Parse an expires value from the session endpoint into a Unix timestamp.
+
+        Handles multiple formats:
+          - ISO 8601 string ("2026-05-05T16:00:00Z")
+          - Epoch seconds (int/float or numeric string)
+          - Seconds from now (small number)
+        Returns 0 if the value cannot be parsed.
+        """
+        if not expires_value:
+            return 0
+
+        # Numeric value (int or float)
+        if isinstance(expires_value, (int, float)):
+            if expires_value > 946684800:  # After year 2000 → epoch seconds
+                return float(expires_value)
+            return time.time() + expires_value  # Small number → seconds from now
+
+        s = str(expires_value).strip()
+
+        # Try ISO 8601 formats
+        try:
+            from datetime import datetime, timezone
+            for fmt in (
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%S.%f%z",
+            ):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return dt.timestamp()
+                except ValueError:
+                    continue
+        except Exception:
+            pass
+
+        # Try as numeric string
+        try:
+            val = float(s)
+            if val > 946684800:
+                return val
+            return time.time() + val
+        except ValueError:
+            pass
+
+        return 0
 
     def _refresh_token(self) -> None:
         """Get a fresh access token from the session endpoint.
@@ -234,12 +297,20 @@ class FlowClient:
         3. Full browser re-authentication (last resort — requires user login)
         """
         # Tier 1: Try existing cookies
+        saved_err = None
         try:
             data = refresh_access_token(self.cookies, debug=self.debug)
+            expires = self._parse_expires(data.get("expires", ""))
+            if expires and time.time() >= (expires - 60):
+                # The session endpoint sometimes returns 200 OK but with an expired token
+                # when the cookies are stale. Treat this as an AuthError to trigger recovery.
+                raise AuthError(f"Server returned an expired token (expires: {data.get('expires')})")
+            
             self._apply_token(data)
             return
-        except AuthError as original_err:
-            logger.info("Tier 1 failed (existing cookies expired)")
+        except AuthError as e:
+            saved_err = e
+            logger.info("Tier 1 failed (existing cookies expired or returned expired token)")
 
         # Tier 2: Silent CDP cookie refresh — re-extract cookies from the
         # Chrome instance that's already running (Google rotates cookies
@@ -260,13 +331,20 @@ class FlowClient:
         logger.info("Falling back to full browser re-authentication...")
         new_cookies = self._re_authenticate()
         if not new_cookies:
-            raise original_err
+            if saved_err:
+                raise saved_err
+            raise AuthError("Authentication failed")
         data = refresh_access_token(self.cookies, debug=self.debug)
         self._apply_token(data)
 
     def _apply_token(self, data: dict) -> None:
         """Apply a fresh access token and update session headers."""
         self._access_token = data["access_token"]
+        self._token_expires = self._parse_expires(data.get("expires", ""))
+
+        if self.debug and self._token_expires:
+            remaining = self._token_expires - time.time()
+            logger.info("Token expires in %.0f seconds (%.1f minutes)", remaining, remaining / 60)
 
         # Update sandbox session (Bearer only, no cookies)
         self._sandbox_session.headers.update({
@@ -292,10 +370,13 @@ class FlowClient:
         try:
             from gflow.auth import BrowserAuth, save_env
             browser_auth = BrowserAuth(debug=self.debug)
-            auth = browser_auth.get_auth(interactive=True)
-            save_env(auth)
-            self.cookies = auth.cookies
-            return self.cookies
+            # Force browser login, bypassing get_auth's local disk check
+            auth = browser_auth._login_with_browser()
+            if auth and auth.is_valid:
+                save_env(auth)
+                self.cookies = auth.cookies
+                return self.cookies
+            return None
         except Exception as e:
             logger.warning("Auto re-authentication failed: %s", e)
             return None

@@ -96,10 +96,19 @@ def auth(ctx: click.Context, profile, do_clear, show_status):
         if data and data.is_valid:
             try:
                 session = refresh_access_token(data.cookies, debug=debug)
+                expires_str = session.get('expires', '')
+                
+                # Check if the server returned an already-expired token
+                from gflow.api.client import FlowClient
+                import time
+                expires_ts = FlowClient._parse_expires(expires_str)
+                if expires_ts and time.time() >= (expires_ts - 60):
+                    raise AuthError(f"Session expired (server returned expired token: {expires_str})")
+                
                 user = session.get("user", {})
                 console.print(f"[green]Authenticated[/green] as {user.get('name', '?')} ({user.get('email', '?')})")
                 console.print(f"Token: {session['access_token'][:25]}...")
-                console.print(f"Expires: {session.get('expires', '?')}")
+                console.print(f"Expires: {expires_str or '?'}")
             except AuthError as e:
                 console.print(f"[yellow]Cookies saved but session expired:[/yellow] {e}")
                 console.print("Run 'gflow auth --clear && gflow auth' to re-authenticate.")
