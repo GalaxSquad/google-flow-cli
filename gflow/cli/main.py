@@ -35,7 +35,7 @@ console = Console()
 logger = logging.getLogger("gflow")
 
 
-def _get_client(debug: bool = False) -> FlowClient:
+def _get_client(debug: bool = False, project_id: str = "") -> FlowClient:
     """Create an authenticated FlowClient, auto-launching auth if needed."""
     auth = load_env()
     if not auth or not auth.is_valid:
@@ -51,6 +51,7 @@ def _get_client(debug: bool = False) -> FlowClient:
     return FlowClient(
         cookies=auth.cookies,
         debug=debug,
+        project_id=project_id,
     )
 
 
@@ -157,8 +158,9 @@ def close_browser(ctx):
 @click.option("--num", default=1, type=click.IntRange(1, 8), help="Number of images (1-8)")
 @click.option("-o", "--output", default=None, help="Output file path (auto-named if omitted)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--project", default="", help="Specific project ID to use")
 @click.pass_context
-def generate_image(ctx, prompt, aspect_ratio, seed, num, output, as_json):
+def generate_image(ctx, prompt, aspect_ratio, seed, num, output, as_json, project):
     """Generate images from a text prompt using Imagen 4.
 
     \b
@@ -167,7 +169,7 @@ def generate_image(ctx, prompt, aspect_ratio, seed, num, output, as_json):
         gflow generate-image "sunset over mountains" --aspect-ratio landscape --num 4
         gflow generate-image "logo design" --aspect-ratio square -o logo.png
     """
-    client = _get_client(ctx.obj["debug"])
+    client = _get_client(ctx.obj["debug"], project_id=project)
 
     req = GenerateImageRequest(
         prompt=prompt,
@@ -235,8 +237,9 @@ def generate_image(ctx, prompt, aspect_ratio, seed, num, output, as_json):
 @click.option("--timeout", default=300, type=int, help="Max wait seconds (default: 300)")
 @click.option("-o", "--output", default=None, help="Output file path")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--project", default="", help="Specific project ID to use")
 @click.pass_context
-def generate_video(ctx, prompt, aspect_ratio, seed, wait, timeout, output, as_json):
+def generate_video(ctx, prompt, aspect_ratio, seed, wait, timeout, output, as_json, project):
     """Generate a video from a text prompt using Veo 3.1.
 
     \b
@@ -250,7 +253,7 @@ def generate_video(ctx, prompt, aspect_ratio, seed, wait, timeout, output, as_js
         gflow generate-video "ocean waves" -o waves.mp4
         gflow generate-video "cat walking" --no-wait  # just submit, don't wait
     """
-    client = _get_client(ctx.obj["debug"])
+    client = _get_client(ctx.obj["debug"], project_id=project)
 
     req = GenerateVideoRequest(
         prompt=prompt,
@@ -318,8 +321,9 @@ def generate_video(ctx, prompt, aspect_ratio, seed, wait, timeout, output, as_js
 @click.option("--timeout", default=300, type=int, help="Max wait seconds (default: 300)")
 @click.option("-o", "--output", default=None, help="Output file path")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--project", default="", help="Specific project ID to use")
 @click.pass_context
-def extend_video(ctx, media_id, prompt, aspect_ratio, seed, wait, timeout, output, as_json):
+def extend_video(ctx, media_id, prompt, aspect_ratio, seed, wait, timeout, output, as_json, project):
     """Extend an existing video with a continuation prompt.
 
     \b
@@ -331,7 +335,7 @@ def extend_video(ctx, media_id, prompt, aspect_ratio, seed, wait, timeout, outpu
         gflow extend-video abc123-def456 "the cat jumps onto a couch"
         gflow extend-video abc123 "camera pans left" -o extended.mp4
     """
-    client = _get_client(ctx.obj["debug"])
+    client = _get_client(ctx.obj["debug"], project_id=project)
 
     req = ExtendVideoRequest(
         prompt=prompt,
@@ -404,9 +408,10 @@ def extend_video(ctx, media_id, prompt, aspect_ratio, seed, wait, timeout, outpu
 @click.option("-o", "--output-dir", default=".", help="Output directory for segments")
 @click.option("--prefix", default="gflow-long", help="Filename prefix for segments")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@click.option("--project", default="", help="Specific project ID to use")
 @click.pass_context
 def long_video(ctx, prompt, extend_prompt, extensions, aspect_ratio, seed,
-               timeout, output_dir, prefix, as_json):
+               timeout, output_dir, prefix, as_json, project):
     """Generate a long video by auto-extending multiple times.
 
     \b
@@ -426,7 +431,7 @@ def long_video(ctx, prompt, extend_prompt, extensions, aspect_ratio, seed,
     """
     import time as _time
 
-    client = _get_client(ctx.obj["debug"])
+    client = _get_client(ctx.obj["debug"], project_id=project)
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 

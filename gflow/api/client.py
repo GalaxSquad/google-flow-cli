@@ -161,12 +161,12 @@ class FlowClient:
     3. Cookie auth for labs.google
     """
 
-    def __init__(self, cookies: str, *, debug: bool = False):
+    def __init__(self, cookies: str, *, debug: bool = False, project_id: str = ""):
         self.debug = debug or os.environ.get("GFLOW_DEBUG") == "true"
         self.cookies = cookies
         self._access_token: str = ""
         self._token_expires: float = 0  # Unix timestamp when token expires
-        self._project_id: str = ""
+        self._project_id: str = project_id
         self._workflow_id: str = ""
         self._primary_media_id: str = ""  # from workflow metadata — used for extend
         self._session_id: str = f";{int(time.time() * 1000)}"
@@ -1530,6 +1530,18 @@ class FlowClient:
                 raise FlowRecaptchaError(
                     f"Permission denied (403): {resp_text}"
                 )
+            # Google "Sorry" HTML page = IP blocked at infra level (same as 401 proxy mismatch)
+            # Try routing via Chrome CDP (which uses the browser's whitelisted IP)
+            if "<html" in resp_text.lower() or "<!doctype" in resp_text.lower():
+                logger.info("Got 403 HTML block (IP blocked) — trying via Chrome CDP...")
+                cdp_result = self._request_via_cdp(method, url, json_payload)
+                if cdp_result is not None:
+                    logger.info("CDP sandbox request succeeded after 403 HTML block")
+                    fake_resp = requests.Response()
+                    fake_resp.status_code = 200
+                    fake_resp._content = json.dumps(cdp_result).encode("utf-8")
+                    fake_resp.encoding = "utf-8"
+                    return fake_resp
             raise FlowAPIError(
                 f"Permission denied (403): {resp_text}"
             )
