@@ -1467,13 +1467,29 @@ class FlowClient:
     def _sandbox_request(self, method: str, url: str, json_payload: dict | None = None) -> requests.Response:
         """Make an authenticated request to aisandbox-pa.googleapis.com.
 
-        On proxy setups, falls back to Chrome CDP routing when direct HTTP
-        gets 401 (IP mismatch between Python requests and Chrome's proxy).
+        Primary path: Chrome CDP (ensures IP consistency with auth session).
+        Fallback: direct HTTP (used when CDP is unavailable).
         """
         import time as _time
 
         if self.debug:
             logger.info("%s %s", method, url)
+
+        # --- Primary: Chrome CDP ---
+        # Route through Chrome so auth, token, and API all share the same
+        # exit IP. Avoids 403 IP-block entirely instead of recovering from it.
+        cdp_result = self._request_via_cdp(method, url, json_payload)
+        if cdp_result is not None:
+            if self.debug:
+                logger.info("CDP sandbox request succeeded (primary path)")
+            fake_resp = requests.Response()
+            fake_resp.status_code = 200
+            fake_resp._content = json.dumps(cdp_result).encode("utf-8")
+            fake_resp.encoding = "utf-8"
+            return fake_resp
+
+        # --- Fallback: direct HTTP ---
+        logger.info("CDP unavailable — falling back to direct HTTP for %s %s", method, url)
 
         # aisandbox-pa uses text/plain;charset=UTF-8 with JSON body
         kwargs: dict[str, Any] = {"timeout": 120}
@@ -1491,8 +1507,9 @@ class FlowClient:
                     requests.exceptions.ProxyError) as e:
                 if attempt < max_retries - 1:
                     wait = 5 * (attempt + 1)
-                    logger.warning("Connection error on %s %s (attempt %d/%d), retrying in %ds: %s", method, url, attempt + 1, max_retries, wait, e)
-                    self._rotate_proxy()  # Try next proxy on connection failure
+                    logger.warning("Connection error on %s %s (attempt %d/%d), retrying in %ds: %s",
+                                   method, url, attempt + 1, max_retries, wait, e)
+                    self._rotate_proxy()
                     _time.sleep(wait)
                 else:
                     raise
@@ -1501,47 +1518,18 @@ class FlowClient:
             if self.debug:
                 logger.info("Got 401, refreshing token...")
             self._refresh_token()
-            # Also try rotating proxy on 401 — datacenter IPs get blocked
             if self._proxies:
                 self._rotate_proxy()
             resp = self._sandbox_session.request(method, url, **kwargs)
-
-        # If still 401 and we have a proxy setup, the issue is likely IP mismatch:
-        # Python requests exits through a different proxy IP than Chrome.
-        # Route through Chrome CDP instead (same IP as auth session).
-        if resp.status_code == 401 and self._proxies:
-            logger.info("Direct HTTP still 401 with proxies — trying via Chrome CDP (same IP as auth)...")
-            cdp_result = self._request_via_cdp(method, url, json_payload)
-            if cdp_result is not None:
-                logger.info("CDP sandbox request succeeded — proxy IP mismatch confirmed")
-                # Wrap in a fake Response so callers can use .json() / .status_code
-                fake_resp = requests.Response()
-                fake_resp.status_code = 200
-                fake_resp._content = json.dumps(cdp_result).encode("utf-8")
-                fake_resp.encoding = "utf-8"
-                return fake_resp
 
         if resp.status_code == 401:
             raise FlowAPIError("Auth expired. Run: gflow auth --clear\nthen: gflow auth")
         if resp.status_code == 403:
             resp_text = resp.text[:500]
-            # reCAPTCHA failures are retryable — score can vary between evaluations
             if "recaptcha" in resp_text.lower() or "reCAPTCHA" in resp_text:
                 raise FlowRecaptchaError(
                     f"Permission denied (403): {resp_text}"
                 )
-            # Google "Sorry" HTML page = IP blocked at infra level (same as 401 proxy mismatch)
-            # Try routing via Chrome CDP (which uses the browser's whitelisted IP)
-            if "<html" in resp_text.lower() or "<!doctype" in resp_text.lower():
-                logger.info("Got 403 HTML block (IP blocked) — trying via Chrome CDP...")
-                cdp_result = self._request_via_cdp(method, url, json_payload)
-                if cdp_result is not None:
-                    logger.info("CDP sandbox request succeeded after 403 HTML block")
-                    fake_resp = requests.Response()
-                    fake_resp.status_code = 200
-                    fake_resp._content = json.dumps(cdp_result).encode("utf-8")
-                    fake_resp.encoding = "utf-8"
-                    return fake_resp
             raise FlowAPIError(
                 f"Permission denied (403): {resp_text}"
             )
